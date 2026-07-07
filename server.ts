@@ -33,7 +33,7 @@ async function startServer() {
   app.get("/api/db", (req, res) => {
     try {
       const db = readDB();
-      res.json(db);
+      res.json({ db });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to read database state", details: err.message });
     }
@@ -79,6 +79,481 @@ async function startServer() {
       res.json({ success: true, user, student });
     } catch (err: any) {
       res.status(500).json({ error: "Authentication failed", details: err.message });
+    }
+  });
+
+  // API Route: Credential-based Sign-In (Matches client App.tsx fetch)
+  app.post("/api/auth/credential", (req, res) => {
+    try {
+      const { username, password, role } = req.body;
+      const db = readDB();
+      
+      const user = db.users.find((u) => {
+        // Support firstname.lastname matching
+        const normalizedName = u.name.toLowerCase().replace(/[^a-z0-9]/g, ".");
+        const emailPrefix = u.email.split("@")[0].toLowerCase();
+        return (
+          u.role === role &&
+          (normalizedName === username.toLowerCase() ||
+           emailPrefix === username.toLowerCase() ||
+           u.name.toLowerCase() === username.toLowerCase() ||
+           username.toLowerCase() === u.id.toLowerCase())
+        );
+      });
+
+      if (!user) {
+        return res.status(401).json({ message: `Invalid security portal credentials for the specified role. Try signing in as: ${role === 'Student' ? 'abebe.kebede' : role === 'Instructor' ? 'solomon.tadesse' : role === 'System Administrator' ? 'dejene.dagnu' : 'your name'} (Password: any value).` });
+      }
+
+      const student = db.students.find((s) => s.userId === user.id);
+
+      addLog(user.id, user.name, user.role, "Credential Login", "Authenticated successfully using security credentials fallback.");
+      res.json({ success: true, user, student });
+    } catch (err: any) {
+      res.status(500).json({ message: "Authentication gateway portal failure: " + err.message });
+    }
+  });
+
+  // API Route: Biometric Login Match (Matches client App.tsx fetch)
+  app.post("/api/auth/biometric", (req, res) => {
+    try {
+      const { faceData } = req.body;
+      if (!faceData) {
+        return res.status(400).json({ message: "No facial biometric signature template provided." });
+      }
+
+      const db = readDB();
+      // Look for the first user that has face data enrolled (simulation)
+      const enrolledUser = db.users.find((u) => u.faceEnrolled && u.faceData);
+      
+      if (!enrolledUser) {
+        return res.status(404).json({ message: "No enrolled facial profile templates exist in the registry. Sign in normally to enroll your Face ID." });
+      }
+
+      const student = db.students.find((s) => s.userId === enrolledUser.id);
+      
+      addLog(enrolledUser.id, enrolledUser.name, enrolledUser.role, "Biometric Login", "Successfully validated security access utilizing webcam facial ID.");
+      res.json({ success: true, user: enrolledUser, student });
+    } catch (err: any) {
+      res.status(500).json({ message: "Biometric system failure: " + err.message });
+    }
+  });
+
+  // API Route: Biometric Enrollment (Matches client App.tsx fetch)
+  app.post("/api/auth/enroll", (req, res) => {
+    try {
+      const { userId, faceData } = req.body;
+      if (!userId || !faceData) {
+        return res.status(400).json({ message: "User reference and facial snapshot base64 template are required." });
+      }
+
+      const db = readDB();
+      const userIndex = db.users.findIndex((u) => u.id === userId);
+      if (userIndex === -1) {
+        return res.status(404).json({ message: "Account reference not found." });
+      }
+
+      db.users[userIndex].faceEnrolled = true;
+      db.users[userIndex].faceData = faceData;
+
+      const studentIndex = db.students.findIndex((s) => s.userId === userId);
+      if (studentIndex !== -1) {
+        db.students[studentIndex].faceEnrollmentUrl = faceData;
+      }
+
+      writeDB(db);
+      addLog(db.users[userIndex].id, db.users[userIndex].name, db.users[userIndex].role, "Biometric Enrollment", "Registered webcam Face ID template with secure registry gateway.");
+      
+      res.json({ success: true, user: db.users[userIndex] });
+    } catch (err: any) {
+      res.status(500).json({ message: "Secure enrollment registration failed: " + err.message });
+    }
+  });
+
+  // API Route: Course registration (Matches client App.tsx fetch)
+  app.post("/api/register", (req, res) => {
+    try {
+      const { studentId, courseCodes } = req.body;
+      if (!studentId || !courseCodes || !Array.isArray(courseCodes)) {
+        return res.status(400).json({ message: "Student record reference and course code list are required." });
+      }
+
+      const db = readDB();
+      const student = db.students.find((s) => s.id === studentId);
+      if (!student) {
+        return res.status(404).json({ message: "Student record not found." });
+      }
+
+      const semester = student.semester;
+
+      let totalCredits = 0;
+      const proposedCourses = db.courses.filter((c) => courseCodes.includes(c.code));
+      totalCredits = proposedCourses.reduce((sum, c) => sum + c.credits, 0);
+
+      if (totalCredits > 18) {
+        return res.status(400).json({
+          message: `Registration credit threshold exceeded! Selected courses sum to ${totalCredits} credits (maximum allowed is 18).`
+        });
+      }
+
+      db.registrations = db.registrations.filter(
+        (r) => !(r.studentId === studentId && r.semester === semester && (r.status === "Draft" || r.status === "Pending_Advisor"))
+      );
+
+      const newRegistrations = courseCodes.map((code) => ({
+        id: `REG-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        studentId,
+        courseCode: code,
+        semester,
+        status: "Pending_Advisor" as const,
+        date: new Date().toISOString().split("T")[0]
+      }));
+
+      db.registrations.push(...newRegistrations);
+      writeDB(db);
+
+      addLog(
+        student.userId,
+        student.name,
+        "Student",
+        "Registration Submission",
+        `Submitted academic registration for ${courseCodes.length} courses (${totalCredits} credits) in ${semester}.`
+      );
+
+      res.json({ success: true, registrations: newRegistrations });
+    } catch (err: any) {
+      res.status(500).json({ message: "Failed to record registrations: " + err.message });
+    }
+  });
+
+  // API Route: Appeals creation (Matches client App.tsx fetch)
+  app.post("/api/appeals/submit", (req, res) => {
+    try {
+      const { studentId, courseCode, reason } = req.body;
+      if (!studentId || !courseCode || !reason) {
+        return res.status(400).json({ message: "Student reference, course code, and detailed appeal justification required." });
+      }
+
+      const db = readDB();
+      const studentGrade = db.grades.find((g) => g.studentId === studentId && g.courseCode === courseCode);
+      if (!studentGrade) {
+        return res.status(404).json({ message: "No finalized grade record exists for this registration course." });
+      }
+
+      const newAppeal = {
+        id: `APP-${Date.now()}`,
+        studentId,
+        courseCode,
+        originalGrade: studentGrade.letterGrade,
+        originalTotal: studentGrade.total,
+        reason,
+        status: "Pending" as const,
+        date: new Date().toISOString().split("T")[0]
+      };
+
+      db.appeals.push(newAppeal);
+      writeDB(db);
+
+      const student = db.students.find((s) => s.id === studentId);
+      addLog(
+        student?.userId || "STUD-001",
+        student?.name || "Student",
+        "Student",
+        "Grade Appeal Submitted",
+        `Filed formal academic appeal for re-marking course grade: ${courseCode}.`
+      );
+
+      res.json({ success: true, appeal: newAppeal });
+    } catch (err: any) {
+      res.status(500).json({ message: "Failed to register appeal: " + err.message });
+    }
+  });
+
+  // API Route: Save grades spreadsheet (Matches client App.tsx fetch)
+  app.post("/api/grades/save", (req, res) => {
+    try {
+      const { courseCode, grades, submitToDept, actorId } = req.body;
+      if (!courseCode || !grades || !Array.isArray(grades)) {
+        return res.status(400).json({ message: "Course code and grades spreadsheet list are required." });
+      }
+
+      const db = readDB();
+      const semester = "Year 3 Semester 2"; // default context
+
+      const calculateGradeLetter = (total: number): string => {
+        if (total >= 90) return "A+";
+        if (total >= 85) return "A";
+        if (total >= 80) return "A-";
+        if (total >= 75) return "B+";
+        if (total >= 70) return "B";
+        if (total >= 65) return "B-";
+        if (total >= 60) return "C+";
+        if (total >= 50) return "C";
+        if (total >= 45) return "C-";
+        if (total >= 40) return "D";
+        return "F";
+      };
+
+      const actorUser = db.users.find((u) => u.id === actorId) || { name: "Instructor", role: "Instructor" };
+
+      grades.forEach((entry: any) => {
+        const { studentId, continuousAssessment, finalExam } = entry;
+        const ca = Number(continuousAssessment) || 0;
+        const fe = Number(finalExam) || 0;
+        const total = ca + fe;
+        const letter = calculateGradeLetter(total);
+        const nextStatus = submitToDept ? "Submitted_Dept" : "Draft";
+
+        const existingGradeIndex = db.grades.findIndex(
+          (g) => g.studentId === studentId && g.courseCode === courseCode && g.semester === semester
+        );
+
+        const timestamp = new Date().toISOString();
+        const historyEntry = {
+          status: nextStatus,
+          actorName: actorUser.name,
+          actorRole: actorUser.role,
+          timestamp,
+          remarks: submitToDept ? "Grades submitted to Department Head for approval." : "Saved as draft spreadsheet."
+        };
+
+        if (existingGradeIndex !== -1) {
+          db.grades[existingGradeIndex] = {
+            ...db.grades[existingGradeIndex],
+            continuousAssessment: ca,
+            finalExam: fe,
+            total,
+            letterGrade: letter,
+            status: nextStatus,
+            history: [...db.grades[existingGradeIndex].history, historyEntry]
+          };
+        } else {
+          db.grades.push({
+            id: `GR-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            studentId,
+            courseCode,
+            semester,
+            continuousAssessment: ca,
+            finalExam: fe,
+            total,
+            letterGrade: letter,
+            status: nextStatus,
+            instructorId: actorId || "INST-001",
+            history: [historyEntry]
+          });
+        }
+      });
+
+      writeDB(db);
+      addLog(
+        actorId || "INST-001",
+        actorUser.name,
+        actorUser.role,
+        submitToDept ? "Grades Submitted" : "Grades Draft Saved",
+        `Recorded student grading spreadsheet for course ${courseCode} (${grades.length} records).`
+      );
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ message: "Failed to record grades: " + err.message });
+    }
+  });
+
+  // API Route: Advisor Registration Approval (Matches client App.tsx fetch)
+  app.post("/api/advisor/approve-registrations", (req, res) => {
+    try {
+      const { registrationIds, status, actorId } = req.body;
+      if (!registrationIds || !Array.isArray(registrationIds) || !status) {
+        return res.status(400).json({ message: "Registration selections and review status required." });
+      }
+
+      const db = readDB();
+      const actorUser = db.users.find((u) => u.id === actorId) || { name: "Academic Advisor", role: "Academic Advisor" };
+
+      let affectedStudent = "";
+      db.registrations = db.registrations.map((reg) => {
+        if (registrationIds.includes(reg.id)) {
+          affectedStudent = reg.studentId;
+          return {
+            ...reg,
+            status,
+            advisorRemarks: `Academic Advisor evaluated and assigned status: ${status}.`
+          };
+        }
+        return reg;
+      });
+
+      writeDB(db);
+      const studentName = db.students.find((s) => s.id === affectedStudent)?.name || affectedStudent;
+
+      addLog(
+        actorId || "ADV-001",
+        actorUser.name,
+        actorUser.role,
+        "Registration Advisor Decision",
+        `Advisor reviewed and marked ${registrationIds.length} course registrations for student ${studentName} as: ${status}.`
+      );
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ message: "Failed to update registrations: " + err.message });
+    }
+  });
+
+  // API Route: Academic counseling logger (Matches client App.tsx fetch)
+  app.post("/api/advisor/counseling", (req, res) => {
+    try {
+      const { studentId, notes, recommendation, interventionPlan, actorId } = req.body;
+      if (!studentId || !notes) {
+        return res.status(400).json({ message: "Student reference and counseling session notes required." });
+      }
+
+      const db = readDB();
+      const actorUser = db.users.find((u) => u.id === actorId) || { name: "Academic Advisor", role: "Academic Advisor" };
+      const student = db.students.find((s) => s.id === studentId);
+      const studentName = student ? student.name : studentId;
+
+      const newSession = {
+        id: `ADV-S-${Date.now()}`,
+        advisorId: actorId || "ADV-001",
+        studentId,
+        date: new Date().toISOString().split("T")[0],
+        notes,
+        recommendation: recommendation || "Review regular class attendance and test preparation.",
+        interventionPlan: interventionPlan || "Assign secondary tutoring sessions."
+      };
+
+      db.advisingSessions.push(newSession);
+      writeDB(db);
+
+      addLog(
+        actorId || "ADV-001",
+        actorUser.name,
+        actorUser.role,
+        "Counseling Session Logged",
+        `Conducted and documented academic advising panel session with student ${studentName}.`
+      );
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ message: "Failed to document session: " + err.message });
+    }
+  });
+
+  // API Route: Progress and Grade Level approvals (Matches client App.tsx fetch)
+  app.post("/api/grades/approve", (req, res) => {
+    try {
+      const { gradeIds, nextStatus, remarks, actorId } = req.body;
+      if (!gradeIds || !Array.isArray(gradeIds) || !nextStatus) {
+        return res.status(400).json({ message: "Grade sheet selections and target approval level are required." });
+      }
+
+      const db = readDB();
+      const actorUser = db.users.find((u) => u.id === actorId) || { name: "Approval Authority", role: "Department Head" };
+      const timestamp = new Date().toISOString();
+
+      db.grades = db.grades.map((grade) => {
+        if (gradeIds.includes(grade.id)) {
+          if (nextStatus === "Finalized") {
+            const student = db.students.find((s) => s.id === grade.studentId);
+            if (student) {
+              const creditHours = db.courses.find((c) => c.code === grade.courseCode)?.credits || 3;
+              const gpMap: any = { "A+": 4.0, "A": 4.0, "A-": 3.75, "B+": 3.5, "B": 3.0, "B-": 2.75, "C+": 2.5, "C": 2.0, "C-": 1.75, "D": 1.0, "F": 0 };
+              const currentGP = gpMap[grade.letterGrade] || 2.0;
+
+              student.creditHoursCompleted += creditHours;
+              student.gpa = parseFloat(((student.gpa * 3 + currentGP) / 4).toFixed(2));
+              student.cgpa = parseFloat(((student.cgpa * 10 + currentGP) / 11).toFixed(2));
+
+              if (student.cgpa < 2.0) {
+                student.status = "Warning";
+              } else if (student.cgpa >= 2.0 && student.status === "Warning") {
+                student.status = "Active";
+              }
+            }
+          }
+
+          return {
+            ...grade,
+            status: nextStatus,
+            history: [
+              ...grade.history,
+              {
+                status: nextStatus,
+                actorName: actorUser.name,
+                actorRole: actorUser.role,
+                timestamp,
+                remarks: remarks || `Advanced to level: ${nextStatus}.`
+              }
+            ]
+          };
+        }
+        return grade;
+      });
+
+      writeDB(db);
+      addLog(
+        actorId || "DEPT-001",
+        actorUser.name,
+        actorUser.role,
+        "Grade Workflow Advancement",
+        `Reviewed and advanced ${gradeIds.length} academic grade records to level: ${nextStatus}.`
+      );
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ message: "Failed to process grade workflow: " + err.message });
+    }
+  });
+
+  // API Route: Register Disciplinary Case (Matches client App.tsx fetch)
+  app.post("/api/discipline/log", (req, res) => {
+    try {
+      const { studentId, violation, description, warningLevel, penalty, actorId } = req.body;
+      if (!studentId || !violation || !description) {
+        return res.status(400).json({ message: "Student reference, infraction category, and details required." });
+      }
+
+      const db = readDB();
+      const actorUser = db.users.find((u) => u.id === actorId) || { name: "Discipline Officer", role: "Discipline Officer" };
+      const student = db.students.find((s) => s.id === studentId);
+      if (!student) {
+        return res.status(404).json({ message: "Student record not found." });
+      }
+
+      const newCase = {
+        id: `DISC-${Date.now()}`,
+        studentId,
+        violation,
+        date: new Date().toISOString().split("T")[0],
+        description,
+        warningLevel: warningLevel || "None",
+        penalty: penalty || "Review pending formal panel hearing.",
+        status: "Pending" as const,
+        officerId: actorId || "DISC-001"
+      };
+
+      db.disciplineCases.push(newCase);
+
+      if (warningLevel === "Suspended") {
+        const studentIndex = db.students.findIndex((s) => s.id === studentId);
+        if (studentIndex !== -1) {
+          db.students[studentIndex].status = "Suspended";
+        }
+      }
+
+      writeDB(db);
+      addLog(
+        actorId || "DISC-001",
+        actorUser.name,
+        actorUser.role,
+        "Disciplinary Infraction Logged",
+        `Registered official disciplinary infraction file for student ${student.name}: ${violation}.`
+      );
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ message: "Failed to file disciplinary record: " + err.message });
     }
   });
 

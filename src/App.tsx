@@ -44,7 +44,7 @@ export default function App() {
       const res = await fetch("/api/db");
       if (res.ok) {
         const data = await res.json();
-        setDb(data.db);
+        setDb(data.db || data);
       }
     } catch (err) {
       console.error("Error fetching ATTC database state:", err);
@@ -510,7 +510,7 @@ export default function App() {
 
       {/* SYSTEM ROLE SWITCHER HUD OVERLAY (For quick testing/evaluation of all 11 roles) */}
       <div className="z-30 relative shrink-0">
-        <RoleSwitcher onSwitch={handleDevRoleSwitch} activeUser={currentUser} />
+        <RoleSwitcher users={db?.users || []} currentUser={currentUser} onSwitchUser={handleDevRoleSwitch} />
       </div>
 
       {/* FOOTER */}
