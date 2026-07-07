@@ -1,0 +1,6 @@
+{
+  "name": "Student Information Management System (SIMS)",
+  "description": "Comprehensive student lifecycle and academic records management system for ATTC, featuring course registration, grade approvals, advising, discipline, and facial recognition.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
